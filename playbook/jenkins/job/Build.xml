@@ -1,0 +1,159 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job@1400.v7fd111b_ec82f">
+  <actions>
+    <org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobAction plugin="pipeline-model-definition@2.2198.v41dd8ef6dd56"/>
+    <org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobPropertyTrackerAction plugin="pipeline-model-definition@2.2198.v41dd8ef6dd56">
+      <jobProperties/>
+      <triggers/>
+      <parameters/>
+      <options/>
+    </org.jenkinsci.plugins.pipeline.modeldefinition.actions.DeclarativeJobPropertyTrackerAction>
+    <org.jenkinsci.plugins.workflow.multibranch.JobPropertyTrackerAction plugin="workflow-multibranch@783.va_6eb_ef636fb_d">
+      <jobPropertyDescriptors>
+        <string>hudson.model.ParametersDefinitionProperty</string>
+      </jobPropertyDescriptors>
+    </org.jenkinsci.plugins.workflow.multibranch.JobPropertyTrackerAction>
+  </actions>
+  <description></description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <org.biouno.unochoice.ChoiceParameter plugin="uno-choice@2.8.3">
+          <name>Service</name>
+          <randomName>choice-parameter-63256325133873</randomName>
+          <visibleItemCount>1</visibleItemCount>
+          <script class="org.biouno.unochoice.model.GroovyScript">
+            <secureScript plugin="script-security@1341.va_2819b_414686">
+              <script>
+import jenkins.model.Jenkins
+import groovy.json.JsonSlurper
+
+def region = Jenkins.instance.getGlobalNodeProperties()[0].getEnvVars()[&apos;AWS_REGION&apos;]
+def command = [&quot;aws&quot;, &quot;ecr&quot;, &quot;describe-repositories&quot;, &quot;--region&quot;, region, &quot;--query&quot;, &quot;repositories[*].repositoryName&quot;, &quot;--output&quot;, &quot;json&quot;]
+def output = command.execute().text
+def repositories = new JsonSlurper().parseText(output)
+return repositories
+</script>
+              <sandbox>false</sandbox>
+            </secureScript>
+            <secureFallbackScript plugin="script-security@1341.va_2819b_414686">
+              <script>return[&apos;Error&apos;]</script>
+              <sandbox>false</sandbox>
+            </secureFallbackScript>
+          </script>
+          <projectName>Build</projectName>
+          <projectFullName>Build</projectFullName>
+          <choiceType>PT_SINGLE_SELECT</choiceType>
+          <filterable>false</filterable>
+          <filterLength>1</filterLength>
+        </org.biouno.unochoice.ChoiceParameter>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@3894.3896.vca_2c931e7935">
+    <script>properties([
+    parameters([
+        [$class: &apos;ChoiceParameter&apos;,
+            choiceType: &apos;PT_SINGLE_SELECT&apos;,
+            filterLength: 1,
+            filterable: false,
+            name: &apos;Service&apos;,
+            script: [
+                $class: &apos;GroovyScript&apos;,
+                fallbackScript: [
+                    classpath: [],
+                    sandbox: false,
+                    script: &apos;return[\&apos;Error\&apos;]&apos;
+                ],
+                script: [
+                    classpath: [],
+                    sandbox: false,
+                    script: &apos;&apos;&apos;
+import jenkins.model.Jenkins
+import groovy.json.JsonSlurper
+
+def region = Jenkins.instance.getGlobalNodeProperties()[0].getEnvVars()[&apos;AWS_REGION&apos;]
+def command = [&quot;aws&quot;, &quot;ecr&quot;, &quot;describe-repositories&quot;, &quot;--region&quot;, region, &quot;--query&quot;, &quot;repositories[*].repositoryName&quot;, &quot;--output&quot;, &quot;json&quot;]
+def output = command.execute().text
+def repositories = new JsonSlurper().parseText(output)
+return repositories
+&apos;&apos;&apos;
+                ]
+            ]
+        ]
+    ])
+])
+
+pipeline {
+    agent any
+
+    stages {
+        stage(&apos;Init&apos;) {
+            steps{
+                script {
+                    ECR_REPO_URL = sh (
+                        script: &apos;aws ecr describe-repositories --region ${AWS_REGION} --repository-names ${Service} --query \&apos;repositories[0].repositoryUri\&apos;&apos;,
+                        returnStdout: true
+                    ).trim()
+                    GIT_REPO_URL = &apos;${GIT_SSH_URL}/${Service}.git&apos;
+                }
+            }
+        }
+
+        stage(&apos;Checkout&apos;) {
+            steps {
+                git url: &quot;${GIT_REPO_URL}&quot;,
+                branch: &apos;develop&apos;,
+                credentialsId: &apos;ssh-credentials&apos;
+            }
+        }
+
+        stage(&apos;Prepare&apos;) {
+            steps {
+                sh &quot;rm -r certs/*&quot;
+                sh &quot;aws s3 cp s3://${MASTER_BUCKET_NAME}/keycloak/keycloak.cer certs/keycloak.cer&quot;
+            }
+        }
+
+        stage(&apos;Build&apos;) {
+            steps {
+                sh &quot;chmod +x gradlew&quot;
+                sh &apos;./gradlew build&apos;
+            }
+        }
+
+        stage(&apos;Login to ECR&apos;) {
+            steps{
+                sh &quot;aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REPO_URL}&quot;
+            }
+        }
+
+        stage(&apos;Build Image&apos;) {
+
+            steps {
+                sh &apos;docker buildx build --platform=linux/amd64 -t ${Service} .&apos;
+            }
+        }
+
+        stage(&apos;Push Image&apos;) {
+
+            steps {
+                sh &quot;docker tag ${Service}:latest ${ECR_REPO_URL}:latest&quot;
+                sh &quot;docker push ${ECR_REPO_URL}:latest&quot;
+            }
+        }
+
+    }
+
+    post {
+        always {
+            sh &apos;docker image prune -f&apos;
+        }
+    }
+}</script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>

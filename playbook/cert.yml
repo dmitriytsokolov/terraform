@@ -1,0 +1,29 @@
+---
+- name: Issuing certificate
+  hosts: 127.0.0.1
+  connection: local
+
+  tasks:
+    - openssl_privatekey:
+        path: keycloak.pem
+        size: 2048
+        mode: '0755'
+
+    - openssl_csr:
+        common_name: "*.{{ region }}.compute.amazonaws.com"
+        path: request.csr
+        privatekey_path: keycloak.pem
+
+    - openssl_certificate:
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"
+        privatekey_path: keycloak.pem
+        csr_path: request.csr
+        path: keycloak.cer
+        mode: '0755'
+
+    - name: Copy to {{ bucket_name }} S3 Bucket
+      shell: "aws s3 cp {{ item }} s3://{{ bucket_name }}/keycloak/"
+      loop:
+        - keycloak.pem
+        - keycloak.cer

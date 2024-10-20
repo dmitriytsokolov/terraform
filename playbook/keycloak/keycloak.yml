@@ -1,0 +1,111 @@
+---
+- name: Installing Keycloak
+  hosts: all
+  become: true
+  vars:
+    keycloak_quarkus_admin_user: admin
+    keycloak_quarkus_admin_pass: remembertochangeme
+    keycloak_quarkus_https_port: 443
+    keycloak_quarkus_http_port: 8080
+    keycloak_quarkus_restart_health_check: false
+    keycloak_base_url: "https://{{ keycloak_quarkus_host }}:{{ keycloak_quarkus_https_port }}"
+    keycloak_quarkus_https_key_file_enabled: true
+
+    keycloak_quarkus_db_enabled: true
+    keycloak_quarkus_db_user: keycloak
+    keycloak_quarkus_db_pass: keycloakpass
+    db_host: localhost
+    db_name: postgres
+    keycloak_quarkus_jdbc_url: jdbc:postgresql://{{ db_host }}:5432/{{ db_name }}
+
+    keycloak_realm_name: "test"
+    keycloak_realm_data_file: "test-realm.json"
+
+  collections:
+    - middleware_automation.keycloak_quarkus
+
+  tasks:
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        recurse: yes
+      loop:
+        - /etc/pki/tls
+        - /etc/pki/tls/private
+        - /etc/pki/tls/certs
+
+    - name: Copy certificate and private key
+      ansible.builtin.copy:
+        src: "{{ item.from }}"
+        dest: "{{ item.to }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      with_items:
+        - { from: "../keycloak.pem", to: "/etc/pki/tls/private/server.key.pem" }
+        - { from: "../keycloak.cer", to: "/etc/pki/tls/certs/server.crt.pem" }
+
+    - name: Install Keycloak
+      ansible.builtin.include_role:
+        name: middleware_automation.keycloak.keycloak_quarkus
+
+    - name: "Create Token for service Keycloak"
+      retries: 5
+      delay: 10
+      uri:
+        url: "{{ keycloak_base_url }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ keycloak_quarkus_admin_user }}"
+          password: "{{ keycloak_quarkus_admin_pass }}"
+          grant_type: "password"
+          client_id: "admin-cli"
+        validate_certs: false
+      register: keycloak_token
+
+    - name: "Find out, if Realm {{ keycloak_realm_name }} for service Keycloak exists"
+      uri:
+        url: "{{ keycloak_base_url }}/admin/realms/{{ keycloak_realm_name }}"
+        method: GET
+        status_code:
+          - 200
+          - 404
+        headers:
+          Accept: "application/json"
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        validate_certs: false
+      register: keycloak_realm_exists
+
+    - name: "Create Realm {{ keycloak_realm_name }} for service Keycloak"
+      uri:
+        url: "{{ keycloak_base_url }}/admin/realms"
+        method: POST
+        src: "{{ keycloak_realm_data_file }}"
+        remote_src: "no"
+        status_code:
+          - 201
+        headers:
+          Content-type: "application/json"
+          Accept: "application/json"
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        validate_certs: false
+      register: keycloak_realm_create
+      when: "keycloak_realm_exists.status == 404"
+
+    - name: "Update Realm {{ keycloak_realm_name }} for service Keycloak"
+      uri:
+        url: "{{ keycloak_base_url }}/admin/realms/{{ keycloak_realm_name }}"
+        method: PUT
+        src: "{{ keycloak_realm_data_file }}"
+        remote_src: "no"
+        status_code:
+          - 204
+        headers:
+          Content-type: "application/json"
+          Accept: "application/json"
+          Authorization: "Bearer {{ keycloak_token.json.access_token }}"
+        validate_certs: false
+      register: keycloak_realm_create
+      when: "keycloak_realm_exists.status == 200"

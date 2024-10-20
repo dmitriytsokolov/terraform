@@ -1,0 +1,155 @@
+---
+- name: Install Jenkins
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: download apt key
+      ansible.builtin.apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repo to sources.list
+      ansible.builtin.apt_repository:
+        repo: deb https://pkg.jenkins.io/debian-stable binary/
+        state: present
+        filename: jenkins
+
+    - name: Install java
+      apt:
+        name: openjdk-17-jdk
+        update_cache: yes
+
+    - name: Install aws-cli
+      community.general.snap:
+        name: aws-cli
+        classic: true
+
+    - name: Update apt cache and install jenkins
+      apt:
+        name: jenkins
+        update_cache: yes
+
+    - name: Get secret file
+      ansible.builtin.slurp:
+        src: /var/lib/jenkins/secrets/initialAdminPassword
+      register: initialAdminPassword
+
+    - name: Decode contnt
+      ansible.builtin.set_fact:
+        admin_password: "{{ initialAdminPassword.content | ansible.builtin.b64decode | trim }}"
+
+    - name: Skip Jenkins startup wizard
+      lineinfile:
+        dest=/usr/lib/systemd/system/jenkins.service
+        regexp='^Environment="JAVA_OPTS=-Djava.awt.headless=true'
+        line='Environment="JAVA_OPTS=-Djava.awt.headless=true -Djenkins.install.runSetupWizard=false"'
+      register: result_skip_startup_wizard
+
+    - name: Install Docker
+      ansible.builtin.include_tasks:
+        file: ../docker-tasks.yml
+
+    - name: Add 'jenkins' user to the 'docker' group
+      ansible.builtin.user:
+        name: jenkins
+        groups: docker
+        append: yes
+
+    - name: Install Plugins
+      jenkins_plugin:
+        name: "{{ item.name }}"
+        url_username: "admin"
+        url_password: "{{ admin_password }}"
+      register: plugin_result
+      until: plugin_result is success
+      retries: 10
+      delay: 5
+      with_items:
+        - { name: "cloudbees-folder" }
+        - { name: "antisamy-markup-formatter" }
+        - { name: "build-timeout" }
+        - { name: "credentials-binding" }
+        - { name: "timestamper" }
+        - { name: "ws-cleanup" }
+        - { name: "ant" }
+        - { name: "gradle" }
+        - { name: "workflow-aggregator" }
+        - { name: "github-branch-source" }
+        - { name: "pipeline-github-lib" }
+        - { name: "pipeline-graph-view" }
+        - { name: "git" }
+        - { name: "ssh-slaves" }
+        - { name: "matrix-auth" }
+        - { name: "pam-auth" }
+        - { name: "ldap" }
+        - { name: "email-ext" }
+        - { name: "mailer" }
+        - { name: "dark-theme" }
+        - { name: "pipeline-aws" }
+        - { name: "configuration-as-code" }
+        - { name: "uno-choice" }
+
+    - name: Restart Jenkins
+      ansible.builtin.systemd_service:
+        name: jenkins
+        state: restarted
+        daemon_reload: true
+
+    - name: Download jenkins-cli
+      get_url:
+        url: http://localhost:8080/jnlpJars/jenkins-cli.jar
+        dest: /var/lib/jenkins/
+
+    - name: Create Jcasc Config File
+      ansible.builtin.template:
+        src: "config/jcasc.yaml.j2"
+        dest: "/var/lib/jenkins/jenkins.yaml"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Copy files
+      ansible.builtin.copy:
+        src: "{{ item.from }}"
+        dest: "{{ item.to }}"
+        owner: ubuntu
+        group: ubuntu
+        mode: "{{ item.chmod }}"
+      with_items:
+        - { from: "job/", to: "/var/lib/jenkins/job/", chmod: '0644' }
+        - { from: "../../private.key", to: "/var/lib/jenkins/private.key", chmod: '0644' }
+        - { from: "../../password", to: "/var/lib/jenkins/password", chmod: '0644' }
+        - { from: "script/addSshCredentials.groovy", to: "/var/lib/jenkins/addSshCredentials.groovy", chmod: '0755' }
+        - { from: "script/addUsers.groovy", to: "/var/lib/jenkins/addUsers.groovy", chmod: '0755' }
+        - { from: "script/runBuilds.groovy", to: "/var/lib/jenkins/runBuilds.groovy", chmod: '0755' }
+
+    - name: Reload jcasc configuration
+      shell: java -jar /var/lib/jenkins/jenkins-cli.jar -s http://localhost:8080/ -auth admin:{{ admin_password }} reload-jcasc-configuration
+
+    - name: Restart Jenkins
+      ansible.builtin.systemd_service:
+        name: jenkins
+        state: restarted
+        daemon_reload: true
+
+    - name: Add Ssh Credentials
+      shell: java -jar /var/lib/jenkins/jenkins-cli.jar -s http://localhost:8080/ -auth admin:{{ admin_password }} groovy = < /var/lib/jenkins/addSshCredentials.groovy
+
+    - name: Create jobs
+      shell: java -jar /var/lib/jenkins/jenkins-cli.jar -s http://localhost:8080/ -auth admin:{{ admin_password }} create-job Build < /var/lib/jenkins/job/Build.xml
+
+    - name: Run Builds for all services
+      shell: java -jar /var/lib/jenkins/jenkins-cli.jar -s http://localhost:8080/ -auth admin:{{ admin_password }} groovy = < /var/lib/jenkins/runBuilds.groovy
+
+    - name: Create Users
+      shell: java -jar /var/lib/jenkins/jenkins-cli.jar -s http://localhost:8080/ -auth admin:{{ admin_password }} groovy = < /var/lib/jenkins/addUsers.groovy
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/var/lib/jenkins/private.key"
+        - "/var/lib/jenkins/password"
+        - "/var/lib/jenkins/job"
